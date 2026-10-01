@@ -6,7 +6,8 @@ export const maxDuration=300;
 
 const MODELS=["gemini-3.5-flash-lite","gemini-3.6-flash"] as const;
 const RETRYABLE_STATUS=new Set([429,500,502,503,504]);
-const RETRY_DELAYS=[1500,3500,7000];
+const RETRY_DELAYS=[1500];
+const MODEL_TIMEOUT_MS=30000;
 
 type SummaryPayload={
  summary_short:string;
@@ -27,6 +28,9 @@ const isRetryable=(response:Response,raw:any)=>RETRYABLE_STATUS.has(response.sta
 function friendlyGeminiError(raw:any,status:number){
  const original=String(raw?.error?.message||"");
  const lower=original.toLowerCase();
+ if(status===504||lower.includes("tempo limite")||lower.includes("timeout")){
+  return "A IA demorou mais do que o limite para responder. Tente novamente em alguns instantes.";
+ }
  if(status===429||status===503||lower.includes("high demand")||lower.includes("overload")||lower.includes("temporarily")){
   return "A IA está sobrecarregada agora. Tente novamente em alguns instantes.";
  }
@@ -38,16 +42,26 @@ async function callModel(apiKey:string,model:string,videoUrl:string,prompt:strin
  let lastResponse:Response|null=null;
  let lastRaw:any=null;
  for(let attempt=0;attempt<=RETRY_DELAYS.length;attempt++){
-  const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
-   method:"POST",
-   headers:{"Content-Type":"application/json","x-goog-api-key":apiKey},
-   body:JSON.stringify({
-    contents:[{parts:[{text:prompt},{file_data:{file_uri:videoUrl}}]}],
-    generationConfig:{responseMimeType:"application/json"}
-   })
-  });
+  let response:Response;
   let raw:any={};
-  try{raw=await response.json();}catch{}
+  try{
+   response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-goog-api-key":apiKey},
+    signal:AbortSignal.timeout(MODEL_TIMEOUT_MS),
+    body:JSON.stringify({
+     contents:[{parts:[{text:prompt},{file_data:{file_uri:videoUrl}}]}],
+     generationConfig:{responseMimeType:"application/json"}
+    })
+   });
+   try{raw=await response.json();}catch{}
+  }catch(error){
+   const timedOut=error instanceof Error&&(error.name==="TimeoutError"||error.name==="AbortError");
+   if(!timedOut)throw error;
+   response=new Response(null,{status:504});
+   raw={error:{message:"Tempo limite excedido ao processar o vídeo."}};
+  }
+
   lastResponse=response;
   lastRaw=raw;
   if(response.ok)return {response,raw,model};
@@ -92,7 +106,7 @@ export async function POST(req:NextRequest){
  const {data:video,error:videoError}=await userDb.from("videos").select("id,user_id,youtube_url,title,channel").eq("id",body.videoId).eq("user_id",user.id).single();
  if(videoError||!video)return NextResponse.json({error:"Vídeo não encontrado na sua biblioteca."},{status:404});
 
- await userDb.from("videos").update({summary_status:"processing",summary_error:null,summary_model:null}).eq("id",video.id);
+ await userDb.from("videos").update({summary_status:"processing",summary_error:null,summary_model:null,updated_at:new Date().toISOString()}).eq("id",video.id);
 
  const prompt=`Você é o motor de aprendizagem do VideoBrain. Analise integralmente este vídeo público do YouTube, independentemente do idioma original, e responda em português do Brasil.\n\nTítulo: ${video.title}\nCanal: ${video.channel||"não informado"}\n\nObjetivo: transformar o vídeo em material útil para estudo e recuperação ativa, sem inventar informações que não estejam no conteúdo.\n\nRetorne SOMENTE JSON válido com exatamente estas chaves:\n{\n  "summary_short": "resumo objetivo em 3 a 5 frases",\n  "summary_full": "resumo completo, claro e estruturado em parágrafos, cobrindo ideias centrais, argumentos, exemplos e conclusões relevantes",\n  "key_points": ["5 a 10 pontos principais, cada um autoexplicativo"],\n  "applications": ["2 a 6 aplicações práticas, quando fizer sentido"],\n  "category": "uma categoria curta em português",\n  "tags": ["3 a 8 tags curtas"]\n}\n\nSe algum item não se aplicar, use lista vazia. Não inclua markdown fora do JSON.`;
 
@@ -100,7 +114,7 @@ export async function POST(req:NextRequest){
   const {response,raw,model}=await callGemini(apiKey,video.youtube_url,prompt);
   if(!response.ok){
    const msg=friendlyGeminiError(raw,response.status);
-   await userDb.from("videos").update({summary_status:"failed",summary_error:msg,summary_model:model}).eq("id",video.id);
+   await userDb.from("videos").update({summary_status:"failed",summary_error:msg,summary_model:model,updated_at:new Date().toISOString()}).eq("id",video.id);
    return NextResponse.json({error:msg},{status:isRetryable(response,raw)?503:502});
   }
   const text=(raw?.candidates?.[0]?.content?.parts||[]).map((p:{text?:string})=>p.text||"").join("").trim();
@@ -129,7 +143,7 @@ export async function POST(req:NextRequest){
   return NextResponse.json({ok:true,summary,model});
  }catch(error){
   const message=error instanceof Error?error.message:"Falha ao resumir o vídeo.";
-  await userDb.from("videos").update({summary_status:"failed",summary_error:message.slice(0,500)}).eq("id",video.id);
+  await userDb.from("videos").update({summary_status:"failed",summary_error:message.slice(0,500),updated_at:new Date().toISOString()}).eq("id",video.id);
   return NextResponse.json({error:message},{status:500});
  }
 }
