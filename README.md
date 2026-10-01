@@ -16,3 +16,6 @@ npm run dev
 ```
 
 O projeto foi desenhado mobile-first e preparado para Next.js + Vercel + Supabase.
+
+
+> MVP inicial conectado ao deploy contínuo da Vercel.
