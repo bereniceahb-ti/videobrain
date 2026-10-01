@@ -5,6 +5,8 @@ export const runtime="nodejs";
 export const maxDuration=300;
 
 const MODEL="gemini-3.5-flash-lite";
+const RETRYABLE_STATUS=new Set([429,500,502,503,504]);
+const RETRY_DELAYS=[1500,3500,7000];
 
 type SummaryPayload={
  summary_short:string;
@@ -15,7 +17,46 @@ type SummaryPayload={
  tags:string[];
 };
 
+type GeminiResult={response:Response;raw:any};
+
 const cleanArray=(value:unknown)=>Array.isArray(value)?value.filter((x):x is string=>typeof x==="string").slice(0,12):[];
+const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+
+function friendlyGeminiError(raw:any,status:number){
+ const original=String(raw?.error?.message||"");
+ const lower=original.toLowerCase();
+ if(status===429||status===503||lower.includes("high demand")||lower.includes("overload")||lower.includes("temporarily")){
+  return "A IA está sobrecarregada agora. Tente novamente em alguns instantes.";
+ }
+ if(status>=500)return "O serviço de IA ficou indisponível por alguns instantes. Tente novamente daqui a pouco.";
+ return original||"O Gemini não conseguiu processar este vídeo.";
+}
+
+async function callGemini(apiKey:string,videoUrl:string,prompt:string):Promise<GeminiResult>{
+ let lastResponse:Response|null=null;
+ let lastRaw:any=null;
+ for(let attempt=0;attempt<=RETRY_DELAYS.length;attempt++){
+  const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,{
+   method:"POST",
+   headers:{"Content-Type":"application/json","x-goog-api-key":apiKey},
+   body:JSON.stringify({
+    contents:[{parts:[{text:prompt},{file_data:{file_uri:videoUrl}}]}],
+    generationConfig:{responseMimeType:"application/json"}
+   })
+  });
+  let raw:any={};
+  try{raw=await response.json();}catch{}
+  lastResponse=response;
+  lastRaw=raw;
+  if(response.ok)return {response,raw};
+
+  const retryable=RETRYABLE_STATUS.has(response.status)||String(raw?.error?.message||"").toLowerCase().includes("high demand");
+  if(!retryable||attempt===RETRY_DELAYS.length)break;
+  await sleep(RETRY_DELAYS[attempt]);
+ }
+ if(!lastResponse)throw new Error("Não consegui acessar o serviço de IA.");
+ return {response:lastResponse,raw:lastRaw};
+}
 
 export async function POST(req:NextRequest){
  const apiKey=process.env.GEMINI_API_KEY;
@@ -44,19 +85,11 @@ export async function POST(req:NextRequest){
  const prompt=`Você é o motor de aprendizagem do VideoBrain. Analise integralmente este vídeo público do YouTube e responda em português do Brasil.\n\nTítulo: ${video.title}\nCanal: ${video.channel||"não informado"}\n\nObjetivo: transformar o vídeo em material útil para estudo e recuperação ativa, sem inventar informações que não estejam no conteúdo.\n\nRetorne SOMENTE JSON válido com exatamente estas chaves:\n{\n  "summary_short": "resumo objetivo em 3 a 5 frases",\n  "summary_full": "resumo completo, claro e estruturado em parágrafos, cobrindo ideias centrais, argumentos, exemplos e conclusões relevantes",\n  "key_points": ["5 a 10 pontos principais, cada um autoexplicativo"],\n  "applications": ["2 a 6 aplicações práticas, quando fizer sentido"],\n  "category": "uma categoria curta em português",\n  "tags": ["3 a 8 tags curtas"]\n}\n\nSe algum item não se aplicar, use lista vazia. Não inclua markdown fora do JSON.`;
 
  try{
-  const response=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,{
-   method:"POST",
-   headers:{"Content-Type":"application/json","x-goog-api-key":apiKey},
-   body:JSON.stringify({
-    contents:[{parts:[{text:prompt},{file_data:{file_uri:video.youtube_url}}]}],
-    generationConfig:{responseMimeType:"application/json"}
-   })
-  });
-  const raw=await response.json();
+  const {response,raw}=await callGemini(apiKey,video.youtube_url,prompt);
   if(!response.ok){
-   const msg=raw?.error?.message||"O Gemini não conseguiu processar este vídeo.";
-   await userDb.from("videos").update({summary_status:"failed",summary_error:String(msg).slice(0,500)}).eq("id",video.id);
-   return NextResponse.json({error:msg},{status:502});
+   const msg=friendlyGeminiError(raw,response.status);
+   await userDb.from("videos").update({summary_status:"failed",summary_error:msg}).eq("id",video.id);
+   return NextResponse.json({error:msg},{status:RETRYABLE_STATUS.has(response.status)?503:502});
   }
   const text=(raw?.candidates?.[0]?.content?.parts||[]).map((p:{text?:string})=>p.text||"").join("").trim();
   if(!text)throw new Error("A IA não retornou conteúdo para este vídeo.");
