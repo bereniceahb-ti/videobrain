@@ -16,9 +16,9 @@ async function detectImage(file:File):Promise<Detected[]>{
  if(!key) throw new Error("GEMINI_API_KEY não configurada.");
  const bytes=Buffer.from(await file.arrayBuffer());
  const prompt=`Analise este screenshot de uma lista/interface do YouTube. Extraia APENAS vídeos visíveis. Ignore menus, anúncios, playlists como contêiner e textos de interface. Retorne JSON puro no formato {"videos":[{"title":"título exatamente como visível","channel":"canal se visível","duration":"duração se visível","confidence":0.0}]}. Não invente texto cortado. confidence deve refletir legibilidade, de 0 a 1.`;
- const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${key}`,{
-  method:"POST",headers:{"Content-Type":"application/json"},
-  body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:file.type||"image/jpeg",data:bytes.toString("base64")}}]}],generationConfig:{temperature:0.1,responseMimeType:"application/json"}})
+ const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent`,{
+  method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},
+  body:JSON.stringify({contents:[{parts:[{text:prompt},{inline_data:{mime_type:file.type||"image/jpeg",data:bytes.toString("base64")}}]}],generationConfig:{responseMimeType:"application/json"}})
  });
  if(!res.ok) throw new Error(`Gemini respondeu ${res.status}: ${(await res.text()).slice(0,300)}`);
  const data=await res.json();
