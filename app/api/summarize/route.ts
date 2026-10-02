@@ -1,5 +1,6 @@
 import {NextRequest,NextResponse} from "next/server";
 import {createClient} from "@supabase/supabase-js";
+import {syncVideoToNotion,type NotionVideo} from "@/lib/notion";
 
 export const runtime="nodejs";
 export const maxDuration=300;
@@ -103,7 +104,7 @@ export async function POST(req:NextRequest){
  if(!body.videoId)return NextResponse.json({error:"Vídeo não informado."},{status:400});
 
  const userDb=createClient(supabaseUrl,supabaseKey,{global:{headers:{Authorization:`Bearer ${token}`}},auth:{persistSession:false,autoRefreshToken:false}});
- const {data:video,error:videoError}=await userDb.from("videos").select("id,user_id,youtube_url,title,channel").eq("id",body.videoId).eq("user_id",user.id).single();
+ const {data:video,error:videoError}=await userDb.from("videos").select("id,user_id,youtube_id,youtube_url,title,channel,status,created_at").eq("id",body.videoId).eq("user_id",user.id).single();
  if(videoError||!video)return NextResponse.json({error:"Vídeo não encontrado na sua biblioteca."},{status:404});
 
  await userDb.from("videos").update({summary_status:"processing",summary_error:null,summary_model:null,updated_at:new Date().toISOString()}).eq("id",video.id);
@@ -140,7 +141,33 @@ export async function POST(req:NextRequest){
   }).eq("id",video.id);
   if(updateError)throw new Error("O resumo foi gerado, mas não consegui salvá-lo na biblioteca.");
 
-  return NextResponse.json({ok:true,summary,model});
+  let notion:{ok:boolean;action?:"updated"|"created";url?:string;error?:string}={ok:false};
+  const notionToken=process.env.NOTION_TOKEN;
+  if(notionToken){
+   try{
+    const result=await syncVideoToNotion(notionToken,{
+     id:video.id,
+     youtube_id:video.youtube_id,
+     youtube_url:video.youtube_url,
+     title:video.title,
+     channel:video.channel,
+     category:summary.category||null,
+     tags:summary.tags,
+     summary_short:summary.summary_short,
+     summary_full:summary.summary_full,
+     key_points:summary.key_points,
+     applications:summary.applications,
+     summary_status:"ready",
+     status:video.status,
+     created_at:video.created_at
+    } as NotionVideo);
+    notion={ok:true,action:result.action,url:result.url};
+   }catch(error){
+    notion={ok:false,error:error instanceof Error?error.message:"Falha ao sincronizar com o Notion."};
+   }
+  }
+
+  return NextResponse.json({ok:true,summary,model,notion});
  }catch(error){
   const message=error instanceof Error?error.message:"Falha ao resumir o vídeo.";
   await userDb.from("videos").update({summary_status:"failed",summary_error:message.slice(0,500),updated_at:new Date().toISOString()}).eq("id",video.id);
