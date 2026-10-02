@@ -83,8 +83,9 @@ export default function Home(){
    const res=await fetch("/api/summarize",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${session.access_token}`},body:JSON.stringify({videoId})});
    const data=await res.json();
    if(!res.ok)throw new Error(data.error||"Não consegui resumir este vídeo.");
+   if(data.notion?.ok)setNotionMsg(s=>({...s,[youtubeId]:"Sincronizado automaticamente com o Notion ✓"}));
+   else if(data.notion?.error)setNotionMsg(s=>({...s,[youtubeId]:"Resumo pronto, mas o Notion não sincronizou. Use o botão N para tentar novamente."}));
    if(reload)await loadCloud(userId);
-   void syncNotion(videoId,youtubeId,false);
    setExpanded(e=>({...e,[youtubeId]:true}));
    return true;
   }catch(e){patchLocal(youtubeId,{summaryStatus:"failed",summaryError:e instanceof Error?e.message:"Falha ao gerar resumo."});return false;}
