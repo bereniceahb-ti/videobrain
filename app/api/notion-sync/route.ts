@@ -3,7 +3,7 @@ import {createClient} from "@supabase/supabase-js";
 
 export const runtime="nodejs";
 
-const NOTION_VERSION="2025-09-03";
+const NOTION_VERSION="2026-03-11";
 const DATA_SOURCE_ID="b120386f-3112-4220-a639-7b39c8f2f52f";
 
 type VideoRow={
